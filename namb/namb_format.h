@@ -1,6 +1,6 @@
 #pragma once
 // Compact binary model format (.namb) for NAM
-// Format version 1 - no external dependencies required for reading
+// Format version 2 - no external dependencies required for reading
 
 #include <cstdint>
 #include <cstring>
@@ -15,7 +15,7 @@ namespace namb
 
 // Magic number: "NAMB" as little-endian uint32
 static constexpr uint32_t MAGIC = 0x4E414D42;
-static constexpr uint16_t FORMAT_VERSION = 1;
+static constexpr uint16_t FORMAT_VERSION = 2;
 
 // File offsets
 static constexpr size_t FILE_HEADER_SIZE = 32;
@@ -38,6 +38,8 @@ static constexpr uint8_t GATING_NONE = 0;
 static constexpr uint8_t GATING_GATED = 1;
 static constexpr uint8_t GATING_BLENDED = 2;
 
+// Fallback value for head_dilation if not specified in the model config
+static constexpr uint16_t DEFAULT_HEAD_DILATION = 1;
 // =============================================================================
 // CRC32 (IEEE 802.3 polynomial, same as zlib)
 // =============================================================================

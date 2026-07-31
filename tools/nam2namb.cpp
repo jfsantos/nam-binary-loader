@@ -353,7 +353,8 @@ static void write_wavenet_config(BinaryWriter& w, const json& model_json)
     w.write_u16(static_cast<uint16_t>(head_size));
     w.write_u16(static_cast<uint16_t>(layer_channels));
     w.write_u16(static_cast<uint16_t>(bottleneck));
-    w.write_u16(static_cast<uint16_t>(head_kernel_size)); // was reserved; now stores head_kernel_size
+    w.write_u16(static_cast<uint16_t>(head_kernel_size));
+    w.write_u16(static_cast<uint16_t>(layer.value("head_dilation", DEFAULT_HEAD_DILATION)));
 
     w.write_u8(head_bias ? 1 : 0);
     w.write_u8(static_cast<uint8_t>(num_dilations));

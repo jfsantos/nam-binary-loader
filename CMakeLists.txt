@@ -1,6 +1,8 @@
 cmake_minimum_required(VERSION 3.10)
 project(nam-binary-loader VERSION 0.1.0)
 
+enable_testing()
+
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED OFF)
 set(CMAKE_CXX_EXTENSIONS OFF)
@@ -10,6 +12,8 @@ if (CMAKE_SYSTEM_NAME STREQUAL "Darwin")
   set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -stdlib=libc++")
 elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
   link_libraries(stdc++fs)
+elseif (CMAKE_SYSTEM_NAME STREQUAL "Windows")
+  add_definitions(-DNOMINMAX -DWIN32_LEAN_AND_MEAN -D_USE_MATH_DEFINES)
 endif()
 
 # Path to NeuralAmpModelerCore (sibling directory by default)
@@ -51,11 +55,22 @@ target_include_directories(render_namb PRIVATE "${AUDIO_DSP_TOOLS_DIR}/dsp")
 
 # --- test runner ---
 add_executable(test_namb test/test_namb.cpp ${NAM_SOURCES} ${NAMB_SOURCES})
+add_dependencies(test_namb nam2namb)
 # Ensure assertions are enabled
-set_target_properties(test_namb PROPERTIES COMPILE_OPTIONS "-O0")
-target_compile_options(test_namb PRIVATE
-  $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>,$<CONFIG:MinSizeRel>>:-UNDEBUG>
-)
+if (MSVC)
+  set_target_properties(test_namb PROPERTIES COMPILE_OPTIONS "/Od")
+  target_compile_options(test_namb PRIVATE
+    $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>,$<CONFIG:MinSizeRel>>:/UNDEBUG>
+  )
+else()
+  set_target_properties(test_namb PROPERTIES COMPILE_OPTIONS "-O0")
+  target_compile_options(test_namb PRIVATE
+    $<$<OR:$<CONFIG:Release>,$<CONFIG:RelWithDebInfo>,$<CONFIG:MinSizeRel>>:-UNDEBUG>
+  )
+endif()
+target_compile_definitions(test_namb PRIVATE NAM2NAMB_EXECUTABLE="$<TARGET_FILE:nam2namb>")
+add_test(NAME test_namb COMMAND test_namb)
+set_tests_properties(test_namb PROPERTIES WORKING_DIRECTORY "${NAM_CORE_PATH}")
 
 # Compiler warnings
 if (MSVC)

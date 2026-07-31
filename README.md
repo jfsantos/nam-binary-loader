@@ -60,6 +60,19 @@ test/
 
 ## Building
 
+### Windows (MSVC)
+
+From the repository root:
+
+```powershell
+mkdir build && cd build
+cmake .. -DNAM_CORE_PATH="/path/to/NeuralAmpModelerCore"
+cmake --build . --config Debug
+ctest --test-dir build -C Debug --output-on-failure
+```
+
+### Linux and macOS
+
 ```bash
 mkdir build && cd build
 cmake .. -DNAM_CORE_PATH=/path/to/NeuralAmpModelerCore
@@ -133,3 +146,9 @@ Processes `input.wav` through the model and writes the result to `output.wav` (d
 ```
 
 Tests require example models from the NeuralAmpModelerCore `example_models/` directory to be accessible from the working directory.
+
+When built with CMake, run the registered test from any directory with:
+
+```bash
+ctest --test-dir build -C Debug --output-on-failure
+```

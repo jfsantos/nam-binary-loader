@@ -13,7 +13,7 @@
 #include <NAM/dsp.h>
 #include <NAM/lstm.h>
 #include <NAM/model_config.h>
-#include <NAM/wavenet.h>
+#include <NAM/wavenet/model.h>
 #include "binary_parser_registry.h"
 #include "namb_format.h"
 
@@ -249,8 +249,9 @@ std::unique_ptr<nam::ModelConfig> load_wavenet(BinaryReader& r, const float*& we
     uint16_t head_size = r.read_u16();
     uint16_t la_channels = r.read_u16();
     uint16_t bottleneck = r.read_u16();
-    uint16_t head_kernel_size_raw = r.read_u16(); // was reserved; stores head_kernel_size
+    uint16_t head_kernel_size_raw = r.read_u16();
     int head_kernel_size = (head_kernel_size_raw == 0) ? 1 : static_cast<int>(head_kernel_size_raw);
+    uint16_t head_dilation = r.read_u16();
 
     bool head_bias = r.read_u8() != 0;
     uint8_t num_dilations = r.read_u8();
@@ -321,7 +322,7 @@ std::unique_ptr<nam::ModelConfig> load_wavenet(BinaryReader& r, const float*& we
 
     wc->layer_array_params.emplace_back(
       static_cast<int>(input_size), static_cast<int>(condition_size), static_cast<int>(head_size),
-      head_kernel_size, static_cast<int>(la_channels), static_cast<int>(bottleneck),
+      static_cast<int>(head_dilation), head_kernel_size, static_cast<int>(la_channels), static_cast<int>(bottleneck),
       std::move(kernel_sizes), std::move(dilations), std::move(activation_configs),
       std::move(gating_modes),
       head_bias, static_cast<int>(groups_input), static_cast<int>(groups_input_mixin),
