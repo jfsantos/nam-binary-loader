@@ -6,7 +6,6 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
-#include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -38,12 +37,13 @@ public:
 
   bool has(uint8_t arch_id) const { return parsers_.find(arch_id) != parsers_.end(); }
 
+  /// \brief Parse a config for an architecture ID, or nullptr if it is not registered
   std::unique_ptr<ModelConfig> parse(uint8_t arch_id, BinaryReader& reader, const float*& weights,
                                       size_t& weight_count, const ModelMetadata& meta) const
   {
     auto it = parsers_.find(arch_id);
     if (it == parsers_.end())
-      throw std::runtime_error("NAMB: unknown architecture ID " + std::to_string(arch_id));
+      return nullptr;
     return it->second(reader, weights, weight_count, meta);
   }
 

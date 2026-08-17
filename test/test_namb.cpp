@@ -137,7 +137,8 @@ static void test_roundtrip_for_file(const std::string& nam_path)
   assert(std::filesystem::exists(namb_path));
 
   // Load .namb model
-  std::unique_ptr<nam::DSP> namb_model = nam::get_dsp_namb(namb_path);
+  auto namb_bytes = read_file_bytes(namb_path);
+  std::unique_ptr<nam::DSP> namb_model = nam::get_dsp_namb(namb_bytes.data(), namb_bytes.size());
   assert(namb_model != nullptr);
 
   // Verify same channel counts

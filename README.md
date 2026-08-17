@@ -103,6 +103,30 @@ auto model = nam::get_dsp_namb("model.namb");
 auto model = nam::get_dsp_namb(data_ptr, data_size);
 ```
 
+### Inspecting memory with loadmodel
+
+`loadmodel` prints architecture details plus a runtime memory estimate. For
+buffered models (especially WaveNet), runtime memory depends strongly on the
+audio block size. Use `--buffer-size` to match your
+target:
+
+```bash
+./loadmodel --buffer-size 128 model.namb   # e.g. Teensy Audio blocks
+./loadmodel --buffer-size 48 model.namb    # e.g. 48-sample / 1 ms blocks
+```
+
+For WaveNet, the report now includes a per-component breakdown:
+
+- `Condition buffers`: top-level condition input/output matrices.
+- `Rechannel ring history (exact)` and `Head rechannel ring history (exact)`.
+- `Rechannel outputs` and `Head rechannel outputs`.
+- `LayerArray workspace`: aggregate of per-array work matrices.
+- `Layer conv ring history (exact)`: sum across all dilated conv layer rings.
+- `Layer conv outputs`, `Layer z buffers`, `Layer residual outputs`, and
+  `Layer head outputs`.
+- `Conv/Ring history total (exact)`, `Workspace total (lower bound)`, and
+  `Total runtime (lower-bound estimate)`.
+
 ### Embedded integration (Daisy / STM32)
 
 On embedded targets, you typically store the `.namb` file in external flash (e.g. QSPI) and load it directly from memory. The memory-buffer overload of `get_dsp_namb` avoids any filesystem dependency:

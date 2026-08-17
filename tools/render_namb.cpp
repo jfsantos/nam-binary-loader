@@ -16,6 +16,21 @@
 
 namespace
 {
+bool read_file_bytes(const std::filesystem::path& path, std::vector<uint8_t>& out)
+{
+  std::ifstream file(path, std::ios::binary | std::ios::ate);
+  if (!file.is_open())
+    return false;
+
+  const std::streamsize file_size = file.tellg();
+  if (file_size <= 0)
+    return false;
+  file.seekg(0, std::ios::beg);
+
+  out.resize((size_t)file_size);
+  return file.read(reinterpret_cast<char*>(out.data()), file_size).good();
+}
+
 // Write mono 32-bit float WAV file (IEEE float format 3).
 bool SaveWavFloat32(const char* fileName, const float* samples, size_t numSamples, double sampleRate)
 {
@@ -61,11 +76,22 @@ bool SaveWavFloat32(const char* fileName, const float* samples, size_t numSample
 
 } // namespace
 
+static void print_usage()
+{
+  std::cerr << "Usage: render_namb <model.namb> <input.wav> [output.wav]\n";
+}
+
 int main(int argc, char* argv[])
 {
+  if (argc == 2 && (std::strcmp(argv[1], "--help") == 0 || std::strcmp(argv[1], "-h") == 0))
+  {
+    print_usage();
+    return 0;
+  }
+
   if (argc < 3 || argc > 4)
   {
-    std::cerr << "Usage: render_namb <model.namb> <input.wav> [output.wav]\n";
+    print_usage();
     return 1;
   }
 
@@ -74,7 +100,14 @@ int main(int argc, char* argv[])
   const char* outputPath = (argc >= 4) ? argv[3] : "output.wav";
 
   std::cerr << "Loading model [" << modelPath << "]\n";
-  auto model = nam::get_dsp_namb(std::filesystem::path(modelPath));
+  std::vector<uint8_t> modelBytes;
+  if (!read_file_bytes(std::filesystem::path(modelPath), modelBytes))
+  {
+    std::cerr << "Failed to read model\n";
+    return 1;
+  }
+
+  auto model = nam::get_dsp_namb(modelBytes.data(), modelBytes.size());
   if (!model)
   {
     std::cerr << "Failed to load model\n";
