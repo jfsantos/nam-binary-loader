@@ -16,7 +16,7 @@ We wrote more about what led us to develop this and other optimizations for embe
 
 ## File format overview
 
-All multi-byte values are little-endian. Format version: 1.
+All multi-byte values are little-endian. Format version: 2.
 
 | Offset | Size | Field |
 |--------|------|-------|
@@ -60,6 +60,19 @@ test/
 
 ## Building
 
+### Windows (MSVC)
+
+From the repository root:
+
+```powershell
+mkdir build && cd build
+cmake .. -DNAM_CORE_PATH="/path/to/NeuralAmpModelerCore"
+cmake --build . --config Debug
+ctest --test-dir build -C Debug --output-on-failure
+```
+
+### Linux and macOS
+
 ```bash
 mkdir build && cd build
 cmake .. -DNAM_CORE_PATH=/path/to/NeuralAmpModelerCore
@@ -89,6 +102,30 @@ auto model = nam::get_dsp_namb("model.namb");
 // From memory buffer (useful for embedded/QSPI flash)
 auto model = nam::get_dsp_namb(data_ptr, data_size);
 ```
+
+### Inspecting memory with loadmodel
+
+`loadmodel` prints architecture details plus a runtime memory estimate. For
+buffered models (especially WaveNet), runtime memory depends strongly on the
+audio block size. Use `--buffer-size` to match your
+target:
+
+```bash
+./loadmodel --buffer-size 128 model.namb   # e.g. 128-samples per block
+./loadmodel --buffer-size 48 model.namb    # e.g. 48-samples per block
+```
+
+For WaveNet, the report now includes a per-component breakdown:
+
+- `Condition buffers`: top-level condition input/output matrices.
+- `Rechannel ring history (exact)` and `Head rechannel ring history (exact)`.
+- `Rechannel outputs` and `Head rechannel outputs`.
+- `LayerArray workspace`: aggregate of per-array work matrices.
+- `Layer conv ring history (exact)`: sum across all dilated conv layer rings.
+- `Layer conv outputs`, `Layer z buffers`, `Layer residual outputs`, and
+  `Layer head outputs`.
+- `Conv/Ring history total (exact)`, `Workspace total (lower bound)`, and
+  `Total runtime (lower-bound estimate)`.
 
 ### Embedded integration (Daisy / STM32)
 
@@ -133,3 +170,9 @@ Processes `input.wav` through the model and writes the result to `output.wav` (d
 ```
 
 Tests require example models from the NeuralAmpModelerCore `example_models/` directory to be accessible from the working directory.
+
+When built with CMake, run the registered test from any directory with:
+
+```bash
+ctest --test-dir build -C Debug --output-on-failure
+```

@@ -17,6 +17,9 @@
 #include <NAM/get_dsp.h>
 #include <namb/get_dsp_namb.h>
 #include <namb/namb_format.h>
+#include <json.hpp>
+
+using json = nlohmann::json;
 
 namespace test_namb
 {
@@ -24,6 +27,23 @@ namespace test_namb
 // =============================================================================
 // Helper: read file into byte vector
 // =============================================================================
+
+static std::string quote_command_argument(const std::filesystem::path& path)
+{
+  return "\"" + path.string() + "\"";
+}
+
+static int convert_to_namb(const std::filesystem::path& nam_path, const std::filesystem::path& namb_path)
+{
+  const std::string converter = quote_command_argument(NAM2NAMB_EXECUTABLE);
+  const std::string arguments = quote_command_argument(nam_path) + " " + quote_command_argument(namb_path);
+#ifdef _WIN32
+  const std::string command = "cmd.exe /D /S /C \"" + converter + " " + arguments + "\"";
+#else
+  const std::string command = converter + " " + arguments;
+#endif
+  return std::system(command.c_str());
+}
 
 static std::vector<uint8_t> read_file_bytes(const std::filesystem::path& path)
 {
@@ -97,8 +117,7 @@ static std::vector<std::vector<double>> process_model(nam::DSP* dsp, int num_buf
 static void test_roundtrip_for_file(const std::string& nam_path)
 {
   std::filesystem::path model_path(nam_path);
-  if (!std::filesystem::exists(model_path))
-    return;
+  assert(std::filesystem::exists(model_path));
 
   // Load JSON model
   std::unique_ptr<nam::DSP> json_model = nam::get_dsp(model_path);
@@ -114,20 +133,12 @@ static void test_roundtrip_for_file(const std::string& nam_path)
   std::filesystem::path namb_path = model_path;
   namb_path.replace_extension(".namb");
 
-  // Use the nam2namb tool to create the .namb file
-  std::string cmd = "./nam2namb " + model_path.string() + " " + namb_path.string() + " > /dev/null 2>&1";
-  int ret = system(cmd.c_str());
-  if (ret != 0)
-  {
-    // Try build directory path
-    cmd = "./build/tools/nam2namb " + model_path.string() + " " + namb_path.string() + " > /dev/null 2>&1";
-    ret = system(cmd.c_str());
-  }
-  assert(ret == 0);
+  assert(convert_to_namb(model_path, namb_path) == 0);
   assert(std::filesystem::exists(namb_path));
 
   // Load .namb model
-  std::unique_ptr<nam::DSP> namb_model = nam::get_dsp_namb(namb_path);
+  auto namb_bytes = read_file_bytes(namb_path);
+  std::unique_ptr<nam::DSP> namb_model = nam::get_dsp_namb(namb_bytes.data(), namb_bytes.size());
   assert(namb_model != nullptr);
 
   // Verify same channel counts
@@ -175,6 +186,25 @@ void test_roundtrip()
   {
     test_roundtrip_for_file(model);
   }
+}
+
+void test_head_dilation_roundtrip()
+{
+  const std::filesystem::path source_path("example_models/wavenet.nam");
+  const std::filesystem::path test_path("example_models/wavenet_head_dilation_test.nam");
+
+  std::ifstream source(source_path);
+  assert(source.is_open());
+  json model_json = json::parse(source);
+  model_json["config"]["layers"][0]["head_dilation"] = 2;
+
+  std::ofstream test_file(test_path);
+  assert(test_file.is_open());
+  test_file << model_json;
+  test_file.close();
+
+  test_roundtrip_for_file(test_path.string());
+  std::filesystem::remove(test_path);
 }
 
 // =============================================================================
@@ -246,19 +276,10 @@ void test_bad_checksum()
 {
   // First create a valid .namb file, then corrupt it
   std::filesystem::path nam_path("example_models/lstm.nam");
-  if (!std::filesystem::exists(nam_path))
-    return;
+  assert(std::filesystem::exists(nam_path));
 
   std::filesystem::path namb_path("example_models/lstm_test_bad_crc.namb");
-  std::string cmd = "./nam2namb " + nam_path.string() + " " + namb_path.string() + " > /dev/null 2>&1";
-  int ret = system(cmd.c_str());
-  if (ret != 0)
-  {
-    cmd = "./build/tools/nam2namb " + nam_path.string() + " " + namb_path.string() + " > /dev/null 2>&1";
-    ret = system(cmd.c_str());
-  }
-  if (ret != 0)
-    return;
+  assert(convert_to_namb(nam_path, namb_path) == 0);
 
   // Read the .namb file
   auto data = read_file_bytes(namb_path);
@@ -297,21 +318,12 @@ void test_size_reduction()
   for (const auto& nam_path_str : models)
   {
     std::filesystem::path nam_path(nam_path_str);
-    if (!std::filesystem::exists(nam_path))
-      continue;
+    assert(std::filesystem::exists(nam_path));
 
     std::filesystem::path namb_path = nam_path;
     namb_path.replace_extension(".namb");
 
-    std::string cmd = "./nam2namb " + nam_path.string() + " " + namb_path.string() + " > /dev/null 2>&1";
-    int ret = system(cmd.c_str());
-    if (ret != 0)
-    {
-      cmd = "./build/tools/nam2namb " + nam_path.string() + " " + namb_path.string() + " > /dev/null 2>&1";
-      ret = system(cmd.c_str());
-    }
-    if (ret != 0)
-      continue;
+    assert(convert_to_namb(nam_path, namb_path) == 0);
 
     size_t nam_size = std::filesystem::file_size(nam_path);
     size_t namb_size = std::filesystem::file_size(namb_path);
@@ -371,6 +383,9 @@ int main()
 
   std::cout << "  test_roundtrip..." << std::endl;
   test_namb::test_roundtrip();
+
+  std::cout << "  test_head_dilation_roundtrip..." << std::endl;
+  test_namb::test_head_dilation_roundtrip();
 
   std::cout << "  test_size_reduction..." << std::endl;
   test_namb::test_size_reduction();

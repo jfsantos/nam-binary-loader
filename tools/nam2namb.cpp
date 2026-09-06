@@ -353,7 +353,8 @@ static void write_wavenet_config(BinaryWriter& w, const json& model_json)
     w.write_u16(static_cast<uint16_t>(head_size));
     w.write_u16(static_cast<uint16_t>(layer_channels));
     w.write_u16(static_cast<uint16_t>(bottleneck));
-    w.write_u16(static_cast<uint16_t>(head_kernel_size)); // was reserved; now stores head_kernel_size
+    w.write_u16(static_cast<uint16_t>(head_kernel_size));
+    w.write_u16(static_cast<uint16_t>(layer.value("head_dilation", DEFAULT_HEAD_DILATION)));
 
     w.write_u8(head_bias ? 1 : 0);
     w.write_u8(static_cast<uint8_t>(num_dilations));
@@ -619,13 +620,26 @@ static json resolve_slimmable_container(const json& model_json, double slim_fact
     throw std::runtime_error("SlimmableContainer: 'submodels' must be a non-empty array");
 
   size_t active_index = submodels.size() - 1;
+  double lower_bound = 0.0;
+  double upper_bound = submodels.back()["max_value"].get<double>();
   for (size_t i = 0; i < submodels.size(); ++i)
   {
-    if (slim_factor < submodels[i]["max_value"].get<double>())
+    const double candidate_upper = submodels[i]["max_value"].get<double>();
+    if (slim_factor < candidate_upper)
     {
       active_index = i;
+      upper_bound = candidate_upper;
+      lower_bound = (i == 0) ? 0.0 : submodels[i - 1]["max_value"].get<double>();
       break;
     }
+  }
+
+  if (active_index == submodels.size() - 1)
+  {
+    lower_bound = (submodels.size() == 1)
+      ? 0.0
+      : submodels[submodels.size() - 2]["max_value"].get<double>();
+    upper_bound = submodels.back()["max_value"].get<double>();
   }
 
   json selected = submodels[active_index]["model"];
@@ -639,6 +653,7 @@ static json resolve_slimmable_container(const json& model_json, double slim_fact
 
   std::cerr << "SlimmableContainer: slim=" << slim_factor
             << " -> submodel[" << active_index << "]"
+            << " interval=[" << lower_bound << ", " << upper_bound << ")"
             << " (max_value=" << submodels[active_index]["max_value"].get<double>() << ")"
             << std::endl;
 
@@ -648,6 +663,11 @@ static json resolve_slimmable_container(const json& model_json, double slim_fact
 // =============================================================================
 // Entry point
 // =============================================================================
+
+static void print_usage()
+{
+  std::cerr << "Usage: nam2namb [--slim <factor>] input.nam [output.namb]" << std::endl;
+}
 
 int main(int argc, char* argv[])
 {
@@ -659,6 +679,11 @@ int main(int argc, char* argv[])
   for (int i = 1; i < argc; ++i)
   {
     std::string arg(argv[i]);
+    if (arg == "--help" || arg == "-h")
+    {
+      print_usage();
+      return 0;
+    }
     if (arg == "--slim")
     {
       if (i + 1 >= argc)
@@ -690,7 +715,7 @@ int main(int argc, char* argv[])
 
   if (positional_args.empty())
   {
-    std::cerr << "Usage: nam2namb [--slim <factor>] input.nam [output.namb]" << std::endl;
+    print_usage();
     return 1;
   }
 

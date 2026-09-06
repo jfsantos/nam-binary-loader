@@ -1,19 +1,23 @@
 // Binary .namb loader for NAM models
-// Uses the unified create_dsp() path shared with the JSON loader
+// Uses the unified create_dsp() path shared with the JSON loader.
+// Loading never throws: every failure returns nullptr.
 
 #include <algorithm>
+#include <cmath>
 #include <cstring>
-#include <fstream>
-#include <stdexcept>
 
 #include "get_dsp_namb.h"
 
 #include <NAM/activations.h>
 #include <NAM/convnet.h>
 #include <NAM/dsp.h>
+#include <NAM/get_dsp.h>
 #include <NAM/lstm.h>
 #include <NAM/model_config.h>
-#include <NAM/wavenet.h>
+#if defined(NAM_ENABLE_A2_FAST)
+  #include <NAM/wavenet/a2_fast.h>
+#endif
+#include <NAM/wavenet/model.h>
 #include "binary_parser_registry.h"
 #include "namb_format.h"
 
@@ -117,6 +121,14 @@ struct ParsedMetadata
   double output_level = 0.0;
 };
 
+struct NambBinaryHeader
+{
+  uint32_t total_file_size = 0;
+  uint32_t weights_offset = 0;
+  uint32_t total_weight_count = 0;
+  uint32_t stored_checksum = 0;
+};
+
 ParsedMetadata read_metadata_block(BinaryReader& r)
 {
   ParsedMetadata m;
@@ -146,6 +158,247 @@ nam::ModelMetadata to_model_metadata(const ParsedMetadata& pm)
     meta.output_level = pm.output_level;
   return meta;
 }
+
+const char* architecture_name(const uint8_t arch)
+{
+  switch (arch)
+  {
+    case ARCH_LINEAR: return "Linear";
+    case ARCH_CONVNET: return "ConvNet";
+    case ARCH_LSTM: return "LSTM";
+    case ARCH_WAVENET: return "WaveNet";
+    default: return "Unknown";
+  }
+}
+
+bool parse_namb_header(const uint8_t* data, size_t size, NambBinaryHeader& out)
+{
+  if (data == nullptr || size < FILE_HEADER_SIZE + METADATA_BLOCK_SIZE)
+    return false;
+
+  BinaryReader header_reader(data, FILE_HEADER_SIZE);
+
+  if (header_reader.read_u32() != MAGIC)
+    return false;
+
+  if (header_reader.read_u16() != FORMAT_VERSION)
+    return false;
+
+  header_reader.read_u16(); // flags
+  out.total_file_size = header_reader.read_u32();
+  out.weights_offset = header_reader.read_u32();
+  out.total_weight_count = header_reader.read_u32();
+  header_reader.read_u32(); // model_block_size
+  out.stored_checksum = header_reader.read_u32();
+
+  if (!header_reader.ok())
+    return false;
+
+  if (size < out.total_file_size || out.weights_offset < MODEL_BLOCK_OFFSET)
+    return false;
+
+  if (compute_file_crc32(data, out.total_file_size) != out.stored_checksum)
+    return false;
+
+  const size_t expected_weights_end = out.weights_offset + (size_t)out.total_weight_count * sizeof(float);
+  if (expected_weights_end > out.total_file_size)
+    return false;
+
+  return true;
+}
+
+void skip_activation_config(BinaryReader& r)
+{
+  r.read_u8(); // activation type
+  const uint8_t param_count = r.read_u8();
+  for (uint8_t i = 0; i < param_count; i++)
+    r.read_f32();
+}
+
+bool parse_wavenet_inspection(BinaryReader& r, nam::namb::NambModelInfo::WaveNetInfo& out)
+{
+  out.in_channels = r.read_u8();
+  const uint8_t has_head = r.read_u8();
+  const uint8_t num_layer_arrays = r.read_u8();
+  const uint8_t has_condition_dsp = r.read_u8();
+
+  out.with_head = (has_head != 0);
+  out.num_layer_arrays = static_cast<int>(num_layer_arrays);
+  out.has_condition_dsp = (has_condition_dsp != 0);
+
+  if (out.has_condition_dsp)
+  {
+    r.read_u32(); // condition DSP weight count
+    read_metadata_block(r);
+    r.read_u8(); // condition DSP architecture
+    r.read_u8(); // reserved
+    const uint16_t cdsp_config_size = r.read_u16();
+    r.skip(cdsp_config_size);
+  }
+
+  out.layer_arrays.reserve(num_layer_arrays);
+  for (uint8_t la = 0; la < num_layer_arrays; la++)
+  {
+    nam::namb::NambLayerArrayInfo s;
+    s.input_size = r.read_u16();
+    s.condition_size = r.read_u16();
+    s.head_size = r.read_u16();
+    s.channels = r.read_u16();
+    s.bottleneck = r.read_u16();
+    const uint16_t head_kernel_size_raw = r.read_u16();
+    s.head_kernel_size = (head_kernel_size_raw == 0) ? 1 : static_cast<int>(head_kernel_size_raw);
+    s.head_dilation = r.read_u16();
+
+    s.head_bias = r.read_u8() != 0;
+    const uint8_t num_dilations = r.read_u8();
+    s.num_dilations = num_dilations;
+    s.groups_input = r.read_u16();
+    s.groups_input_mixin = r.read_u16();
+
+    s.layer1x1_active = r.read_u8() != 0;
+    s.layer1x1_groups = r.read_u16();
+    r.read_u8(); // reserved
+
+    s.head1x1_active = r.read_u8() != 0;
+    s.head1x1_out_channels = r.read_u16();
+    s.head1x1_groups = r.read_u16();
+    r.read_u8(); // reserved
+
+    for (int i = 0; i < 8; i++)
+      read_film_params(r);
+
+    s.dilations.reserve(num_dilations);
+    for (uint8_t i = 0; i < num_dilations; i++)
+      s.dilations.push_back(r.read_i32());
+
+    s.kernel_sizes.reserve(num_dilations);
+    for (uint8_t i = 0; i < num_dilations; i++)
+      s.kernel_sizes.push_back(r.read_u16());
+
+    for (uint8_t i = 0; i < num_dilations; i++)
+      skip_activation_config(r);
+
+    for (uint8_t i = 0; i < num_dilations; i++)
+      r.read_u8();
+
+    for (uint8_t i = 0; i < num_dilations; i++)
+      skip_activation_config(r);
+
+    out.layer_arrays.push_back(std::move(s));
+  }
+
+  return r.ok();
+}
+
+#if defined(NAM_ENABLE_A2_FAST)
+bool close_to(const float value, const float target)
+{
+  return std::fabs(value - target) <= 1e-7f;
+}
+
+bool film_inactive(const nam::wavenet::_FiLMParams& params)
+{
+  return !params.active;
+}
+
+bool is_a2_channel_count(const int channels)
+{
+  return channels == 3 || channels == 8;
+}
+
+bool matches_a2_channeling(const nam::wavenet::LayerArrayParams& layer)
+{
+  return layer.input_size == 1 && layer.condition_size == 1 && layer.head_size == 1
+         && layer.bottleneck == layer.channels && is_a2_channel_count(layer.channels);
+}
+
+bool matches_a2_head(const nam::wavenet::LayerArrayParams& layer)
+{
+  return layer.head_kernel_size == nam::wavenet::a2_fast::kHeadKernelSize && layer.head_dilation == 1
+         && layer.head_bias;
+}
+
+bool matches_a2_grouping(const nam::wavenet::LayerArrayParams& layer)
+{
+  if (layer.groups_input != 1 || layer.groups_input_mixin != 1)
+    return false;
+  if (!layer.layer1x1_params.active || layer.layer1x1_params.groups != 1)
+    return false;
+  return !layer.head1x1_params.active;
+}
+
+bool matches_a2_film(const nam::wavenet::LayerArrayParams& layer)
+{
+  return film_inactive(layer.conv_pre_film_params) && film_inactive(layer.conv_post_film_params)
+         && film_inactive(layer.input_mixin_pre_film_params) && film_inactive(layer.input_mixin_post_film_params)
+         && film_inactive(layer.activation_pre_film_params) && film_inactive(layer.activation_post_film_params)
+         && film_inactive(layer._layer1x1_post_film_params) && film_inactive(layer.head1x1_post_film_params);
+}
+
+bool matches_a2_topology(const nam::wavenet::LayerArrayParams& layer)
+{
+  if (layer.dilations.size() != nam::wavenet::a2_fast::kNumLayers)
+    return false;
+  if (layer.kernel_sizes.size() != nam::wavenet::a2_fast::kNumLayers)
+    return false;
+  if (layer.activation_configs.size() != nam::wavenet::a2_fast::kNumLayers)
+    return false;
+  if (layer.gating_modes.size() != nam::wavenet::a2_fast::kNumLayers)
+    return false;
+
+  for (int i = 0; i < nam::wavenet::a2_fast::kNumLayers; i++)
+  {
+    if (layer.dilations[i] != nam::wavenet::a2_fast::kDilations[i])
+      return false;
+    if (layer.kernel_sizes[i] != nam::wavenet::a2_fast::kKernelSizes[i])
+      return false;
+    if (layer.gating_modes[i] != nam::wavenet::GatingMode::NONE)
+      return false;
+
+    const auto& activation = layer.activation_configs[i];
+    if (activation.type != nam::activations::ActivationType::LeakyReLU)
+      return false;
+    if (!activation.negative_slope.has_value())
+      return false;
+    if (!close_to(activation.negative_slope.value(), nam::wavenet::a2_fast::kLeakySlope))
+      return false;
+  }
+
+  return true;
+}
+
+bool is_valid_a2(const nam::wavenet::WaveNetConfig& config)
+{
+  if (config.in_channels != 1)
+    return false;
+  if (config.with_head || config.head_params.has_value())
+    return false;
+  if (config.condition_dsp != nullptr)
+    return false;
+  if (config.layer_array_params.size() != 1)
+    return false;
+
+  const auto& layer = config.layer_array_params[0];
+
+  if (!matches_a2_channeling(layer))
+    return false;
+  if (!matches_a2_head(layer))
+    return false;
+  if (!matches_a2_grouping(layer))
+    return false;
+  if (!matches_a2_film(layer))
+    return false;
+  if (!matches_a2_topology(layer))
+    return false;
+
+  return true;
+}
+
+int get_a2_channels(const nam::wavenet::WaveNetConfig& config)
+{
+  return config.layer_array_params[0].channels;
+}
+#endif
 
 // =============================================================================
 // Binary parsing into typed configs
@@ -185,7 +438,6 @@ std::unique_ptr<nam::ModelConfig> load_lstm(BinaryReader& r, const float*& /*wei
 }
 
 // --- ConvNet ---
-
 std::unique_ptr<nam::ModelConfig> load_convnet(BinaryReader& r, const float*& /*weights*/, size_t& /*weight_count*/,
                                                const nam::ModelMetadata&)
 {
@@ -249,8 +501,9 @@ std::unique_ptr<nam::ModelConfig> load_wavenet(BinaryReader& r, const float*& we
     uint16_t head_size = r.read_u16();
     uint16_t la_channels = r.read_u16();
     uint16_t bottleneck = r.read_u16();
-    uint16_t head_kernel_size_raw = r.read_u16(); // was reserved; stores head_kernel_size
+    uint16_t head_kernel_size_raw = r.read_u16();
     int head_kernel_size = (head_kernel_size_raw == 0) ? 1 : static_cast<int>(head_kernel_size_raw);
+    uint16_t head_dilation = r.read_u16();
 
     bool head_bias = r.read_u8() != 0;
     uint8_t num_dilations = r.read_u8();
@@ -321,7 +574,7 @@ std::unique_ptr<nam::ModelConfig> load_wavenet(BinaryReader& r, const float*& we
 
     wc->layer_array_params.emplace_back(
       static_cast<int>(input_size), static_cast<int>(condition_size), static_cast<int>(head_size),
-      head_kernel_size, static_cast<int>(la_channels), static_cast<int>(bottleneck),
+      static_cast<int>(head_dilation), head_kernel_size, static_cast<int>(la_channels), static_cast<int>(bottleneck),
       std::move(kernel_sizes), std::move(dilations), std::move(activation_configs),
       std::move(gating_modes),
       head_bias, static_cast<int>(groups_input), static_cast<int>(groups_input_mixin),
@@ -334,6 +587,11 @@ std::unique_ptr<nam::ModelConfig> load_wavenet(BinaryReader& r, const float*& we
   // head_scale is the last weight value, but set_weights_ will overwrite it.
   // Pass 0.0f; set_weights_ will set the correct value from weights.
   wc->head_scale = 0.0f;
+
+#if defined(NAM_ENABLE_A2_FAST)
+  if (is_valid_a2(*wc))
+    return nam::wavenet::a2_fast::create_a2_fast_config(get_a2_channels(*wc));
+#endif
 
   return wc;
 }
@@ -369,82 +627,130 @@ std::unique_ptr<nam::ModelConfig> load_model(BinaryReader& r, const float*& weig
 
 std::unique_ptr<nam::DSP> nam::get_dsp_namb(const uint8_t* data, size_t size)
 {
-  if (size < FILE_HEADER_SIZE + METADATA_BLOCK_SIZE)
-    throw std::runtime_error("NAMB: file too small");
+  NambBinaryHeader header;
+  if (!parse_namb_header(data, size, header))
+    return nullptr;
 
-  BinaryReader header_reader(data, FILE_HEADER_SIZE);
-
-  // Validate magic
-  uint32_t magic = header_reader.read_u32();
-  if (magic != MAGIC)
-    throw std::runtime_error("NAMB: invalid magic number");
-
-  // Validate format version
-  uint16_t version = header_reader.read_u16();
-  if (version != FORMAT_VERSION)
-    throw std::runtime_error("NAMB: unsupported format version " + std::to_string(version));
-
-  header_reader.read_u16(); // flags
-  uint32_t total_file_size = header_reader.read_u32();
-  uint32_t weights_offset = header_reader.read_u32();
-  uint32_t total_weight_count = header_reader.read_u32();
-  header_reader.read_u32(); // model_block_size
-  uint32_t stored_checksum = header_reader.read_u32();
-
-  // Validate file size
-  if (size < total_file_size)
-    throw std::runtime_error("NAMB: file truncated (expected " + std::to_string(total_file_size) + " bytes, got "
-                             + std::to_string(size) + ")");
-
-  // Validate CRC32
-  uint32_t computed_checksum = compute_file_crc32(data, total_file_size);
-  if (computed_checksum != stored_checksum)
-    throw std::runtime_error("NAMB: checksum mismatch");
-
-  // Validate weights section
-  size_t expected_weights_end = weights_offset + total_weight_count * sizeof(float);
-  if (expected_weights_end > total_file_size)
-    throw std::runtime_error("NAMB: weights extend beyond file");
-
-  // Read metadata block (at offset 32)
+  // Metadata block (at offset 32)
   BinaryReader meta_reader(data + FILE_HEADER_SIZE, METADATA_BLOCK_SIZE);
   ParsedMetadata pm = read_metadata_block(meta_reader);
   ModelMetadata meta = to_model_metadata(pm);
+  if (!meta_reader.ok() || nam::is_version_supported(meta.version) == nam::Supported::NO)
+    return nullptr;
 
-  // Verify config version
-  nam::verify_config_version(meta.version);
+  const float* weights = reinterpret_cast<const float*>(data + header.weights_offset);
+  size_t weight_count = header.total_weight_count;
 
-  // Get weight data pointer
-  const float* weights = reinterpret_cast<const float*>(data + weights_offset);
-  size_t weight_count = total_weight_count;
+  // Model block (at offset 80)
+  BinaryReader model_reader(data + MODEL_BLOCK_OFFSET, header.weights_offset - MODEL_BLOCK_OFFSET);
 
-  // Read model block (at offset 80)
-  size_t model_data_size = weights_offset - MODEL_BLOCK_OFFSET;
-  BinaryReader model_reader(data + MODEL_BLOCK_OFFSET, model_data_size);
-
-  // Load model config, then construct via unified path
   auto config = load_model(model_reader, weights, weight_count, meta);
+  if (config == nullptr || !model_reader.ok())
+    return nullptr;
+
   std::vector<float> weight_vec(weights, weights + weight_count);
-  auto dsp = create_dsp(std::move(config), std::move(weight_vec), meta);
-  return dsp;
+  return create_dsp(std::move(config), std::move(weight_vec), meta);
 }
 
-std::unique_ptr<nam::DSP> nam::get_dsp_namb(const std::filesystem::path& filename)
+bool nam::namb::inspect_namb(const uint8_t* data, size_t size, NambModelInfo& out)
 {
-  if (!std::filesystem::exists(filename))
-    throw std::runtime_error("NAMB file doesn't exist: " + filename.string());
+  out = NambModelInfo{};
 
-  // Read entire file into memory
-  std::ifstream file(filename, std::ios::binary | std::ios::ate);
-  if (!file.is_open())
-    throw std::runtime_error("Cannot open NAMB file: " + filename.string());
+  NambBinaryHeader header;
+  if (!parse_namb_header(data, size, header))
+  {
+    out.error = "Invalid namb header or checksum";
+    return false;
+  }
 
-  size_t file_size = file.tellg();
-  file.seekg(0, std::ios::beg);
+  BinaryReader meta_reader(data + FILE_HEADER_SIZE, METADATA_BLOCK_SIZE);
+  ParsedMetadata pm = read_metadata_block(meta_reader);
+  out.metadata = to_model_metadata(pm);
+  if (!meta_reader.ok())
+  {
+    out.error = "Failed to parse metadata";
+    return false;
+  }
 
-  std::vector<uint8_t> data(file_size);
-  file.read(reinterpret_cast<char*>(data.data()), file_size);
-  file.close();
+  out.total_weight_count = header.total_weight_count;
 
-  return get_dsp_namb(data.data(), data.size());
+  BinaryReader model_reader(data + MODEL_BLOCK_OFFSET, header.weights_offset - MODEL_BLOCK_OFFSET);
+  out.architecture = model_reader.read_u8();
+  model_reader.read_u8(); // reserved
+  model_reader.read_u16(); // config_size
+  out.architecture_name = architecture_name(out.architecture);
+
+  if (!model_reader.ok())
+  {
+    out.error = "Failed to parse model header";
+    return false;
+  }
+
+  switch (out.architecture)
+  {
+    case ARCH_LINEAR:
+    {
+      NambModelInfo::LinearInfo info;
+      info.receptive_field = model_reader.read_i32();
+      info.bias = model_reader.read_u8() != 0;
+      info.in_channels = model_reader.read_u8();
+      info.out_channels = model_reader.read_u8();
+      model_reader.read_u8(); // reserved
+      out.linear = std::move(info);
+      break;
+    }
+    case ARCH_CONVNET:
+    {
+      NambModelInfo::ConvNetInfo info;
+      info.channels = model_reader.read_u16();
+      info.batchnorm = model_reader.read_u8() != 0;
+      const uint8_t num_dilations = model_reader.read_u8();
+      info.groups = model_reader.read_u16();
+      info.in_channels = model_reader.read_u8();
+      info.out_channels = model_reader.read_u8();
+      info.num_dilations = num_dilations;
+      skip_activation_config(model_reader);
+      info.dilations.reserve(num_dilations);
+      for (uint8_t i = 0; i < num_dilations; i++)
+        info.dilations.push_back(model_reader.read_i32());
+      out.convnet = std::move(info);
+      break;
+    }
+    case ARCH_LSTM:
+    {
+      NambModelInfo::LstmInfo info;
+      info.num_layers = model_reader.read_u16();
+      info.input_size = model_reader.read_u16();
+      info.hidden_size = model_reader.read_u16();
+      info.in_channels = model_reader.read_u8();
+      info.out_channels = model_reader.read_u8();
+      model_reader.skip(2);
+      out.lstm = std::move(info);
+      break;
+    }
+    case ARCH_WAVENET:
+    {
+      NambModelInfo::WaveNetInfo info;
+      if (!parse_wavenet_inspection(model_reader, info))
+      {
+        out.error = "Failed to parse WaveNet config";
+        return false;
+      }
+      out.wavenet = std::move(info);
+      break;
+    }
+    default:
+      out.error = "Unsupported architecture id";
+      return false;
+  }
+
+  if (!model_reader.ok())
+  {
+    out.error = "Failed while parsing model body";
+    return false;
+  }
+
+  out.ok = true;
+  return true;
 }
+

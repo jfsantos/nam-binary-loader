@@ -1,10 +1,9 @@
 #pragma once
 // Compact binary model format (.namb) for NAM
-// Format version 1 - no external dependencies required for reading
+// Format version 2 - no external dependencies required for reading
 
 #include <cstdint>
 #include <cstring>
-#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -15,7 +14,7 @@ namespace namb
 
 // Magic number: "NAMB" as little-endian uint32
 static constexpr uint32_t MAGIC = 0x4E414D42;
-static constexpr uint16_t FORMAT_VERSION = 1;
+static constexpr uint16_t FORMAT_VERSION = 2;
 
 // File offsets
 static constexpr size_t FILE_HEADER_SIZE = 32;
@@ -38,6 +37,8 @@ static constexpr uint8_t GATING_NONE = 0;
 static constexpr uint8_t GATING_GATED = 1;
 static constexpr uint8_t GATING_BLENDED = 2;
 
+// Fallback value for head_dilation if not specified in the model config
+static constexpr uint16_t DEFAULT_HEAD_DILATION = 1;
 // =============================================================================
 // CRC32 (IEEE 802.3 polynomial, same as zlib)
 // =============================================================================
@@ -95,13 +96,15 @@ public:
 
   uint8_t read_u8()
   {
-    check(1);
+    if (!check(1))
+      return 0;
     return _data[_pos++];
   }
 
   uint16_t read_u16()
   {
-    check(2);
+    if (!check(2))
+      return 0;
     uint16_t v;
     std::memcpy(&v, _data + _pos, 2);
     _pos += 2;
@@ -110,7 +113,8 @@ public:
 
   uint32_t read_u32()
   {
-    check(4);
+    if (!check(4))
+      return 0;
     uint32_t v;
     std::memcpy(&v, _data + _pos, 4);
     _pos += 4;
@@ -119,7 +123,8 @@ public:
 
   int32_t read_i32()
   {
-    check(4);
+    if (!check(4))
+      return 0;
     int32_t v;
     std::memcpy(&v, _data + _pos, 4);
     _pos += 4;
@@ -128,7 +133,8 @@ public:
 
   float read_f32()
   {
-    check(4);
+    if (!check(4))
+      return 0.0f;
     float v;
     std::memcpy(&v, _data + _pos, 4);
     _pos += 4;
@@ -137,7 +143,8 @@ public:
 
   double read_f64()
   {
-    check(8);
+    if (!check(8))
+      return 0.0;
     double v;
     std::memcpy(&v, _data + _pos, 8);
     _pos += 8;
@@ -146,25 +153,38 @@ public:
 
   void skip(size_t n)
   {
-    check(n);
+    if (!check(n))
+      return;
     _pos += n;
   }
 
   size_t position() const { return _pos; }
   size_t remaining() const { return _size - _pos; }
 
+  /// \brief False once any read ran past the end of the buffer
+  bool ok() const { return _ok; }
+
   const uint8_t* current_ptr() const { return _data + _pos; }
 
 private:
-  void check(size_t n) const
+  /// Reads past the end leave the reader in a failed state and yield zeroes,
+  /// so a truncated file is rejected by the caller instead of read out of bounds.
+  bool check(size_t n)
   {
+    if (!_ok)
+      return false;
     if (_pos + n > _size)
-      throw std::runtime_error("NAMB: unexpected end of data at offset " + std::to_string(_pos));
+    {
+      _ok = false;
+      return false;
+    }
+    return true;
   }
 
   const uint8_t* _data;
   size_t _size;
   size_t _pos;
+  bool _ok = true;
 };
 
 // =============================================================================
