@@ -16,7 +16,7 @@ We wrote more about what led us to develop this and other optimizations for embe
 
 ## File format overview
 
-All multi-byte values are little-endian. Format version: 1.
+All multi-byte values are little-endian. Format version: 2.
 
 | Offset | Size | Field |
 |--------|------|-------|
