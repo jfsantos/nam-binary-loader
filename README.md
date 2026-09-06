@@ -111,8 +111,8 @@ audio block size. Use `--buffer-size` to match your
 target:
 
 ```bash
-./loadmodel --buffer-size 128 model.namb   # e.g. Teensy Audio blocks
-./loadmodel --buffer-size 48 model.namb    # e.g. 48-sample / 1 ms blocks
+./loadmodel --buffer-size 128 model.namb   # e.g. 128-samples per block
+./loadmodel --buffer-size 48 model.namb    # e.g. 48-samples per block
 ```
 
 For WaveNet, the report now includes a per-component breakdown:
